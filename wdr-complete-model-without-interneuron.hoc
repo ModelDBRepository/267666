@@ -1,0 +1,645 @@
+//Created by Paulo Aguiar [pauloaguiar@fc.up.pt]
+// Adapted by Ariane Delrocq and Romain Veltz (Université Côte d’Azur and INRIA Sophia Antipolis France), 2019.
+
+// Steps:
+// 1 - CREATE WDR neuron and interneuron from the respective template cells
+// 2 - SET INPUT SIGNALS/STIMULI
+// 3 - SET SYNAPSES/RECEPTORS
+// 4 - CONNECT STIMULI TO SYNAPSES
+// 5 - PROVIDE NOISE TO WDR
+// 6 - FINAL COMMANDS
+
+
+
+
+
+// 1 *****************************************************************************************************
+
+// CREATE WDR neuron and interneuron from the respective template cells
+
+load_file("WDRwithoutinter.hoc")
+
+objref wdr   // declare the variable wdr
+wdr = new WDRwithoutinter()   // create a cell as defined in the template WDRwithoutinter
+default_stp = 0
+
+
+
+
+// 2 *****************************************************************************************************
+
+// SET INPUT SIGNALS/STIMULI
+// C-fibres and Ad-fibres signals are driven by spike-times stored in vectors
+// noise signals are driven by NetStim objects
+
+// signal periods; all times are in ms
+n_burst_spikes = 1		 	// define the number of spikes created by each stim in the fibres
+T0 = 10.0					// if each stim produces a short burst of spikes, this is their ISI [ms]
+n_close_stims = 1			// define the number of stims in each set (ex: 1=singlet; 3=triplets)
+T1 = 300.0					// in heterogeneous stimulation n_close_stims are separated by T1 [ms]
+n_stim_sets = 15			// define the number of stim sets
+T2 = 1000.0					// period between stimuli sets [ms]
+start_time = 1000.0			// time for first stim [ms]
+
+//tstop is defined after loading the session (close to the end of this file)
+
+// NOTES:	average stimuli period = T2 / n_close_stims
+//			total stims = n_close_stims * n_stim_sets
+
+// contruct the stimulus times vector
+objref stim_times
+stim_times  = new Vector(n_stim_sets*n_close_stims*n_burst_spikes, 0.0)   // creates a zero-filled vector of size n_stim_sets*n_close_stims*n_burst_spikes
+index = 0
+for i=0,n_stim_sets-1 {
+    for j=0,n_close_stims-1 {
+		for k=0,n_burst_spikes-1 {
+		    stim_times.x[index] = start_time + i * T2 + j * T1 + k * T0   // the syntax stim_times.x[index] simply refers to the element of stim_times with index index.
+		    index = index + 1
+		}
+    }
+}
+
+// for Poisson stimulation: contruct the stimulus times vector
+// multiline comment:
+/*
+objref r, stim_times
+r = new Random(666)
+r.negexp(T2)
+stim_times  = new Vector(n_stim_sets, 0.0)
+last_time = start_time
+for i=0,n_stim_sets-1 {
+    stim_times.x[i] = last_time
+    last_time = last_time + r.repick()
+}
+*/
+
+
+printf("\nSTIMULATION TIMES")
+stim_times.printf()
+
+
+
+
+// 3 *****************************************************************************************************
+
+// SET CONNECTIONS/SYNAPSES
+//	Ad-fibres	--> NMDAR, AMPAR	--> wdr
+//	C-fibres	--> NMDAR, AMPAR, NK1R	--> interneuron
+//	interneuron	--> NMDAR, AMPAR, GABAR	--> wdr
+//	interneuron	--> GABAAR		--> wdr
+//	noise_inh	--> GABAAR		--> wdr
+//	noise_exc	--> AMPAR		--> wdr
+
+// Create post-synaptic receptors for all synapses
+
+
+
+// SYNAPSES FROM Ad-FIBRES
+// -----------------------
+
+N_A  = 20		// number of A synapses impinging on WDR
+Ad_delay = 30.0		// delay in the activation of Ad synapses [ms]
+Ad_dispersion = 5.0	//dispersion in the arrival time of Ad signals [ms]
+
+objref nil
+objref ampar_Ad[N_A], nmdar_Ad[N_A]   // declare arrays of size N_A
+objref ampa_Ad_conn[N_A], nmda_Ad_conn[N_A]
+
+for i=0,N_A-1 {
+
+    wdr.dendrite ampar_Ad[i]  = new AMPA_DynSyn(0.5)
+    // create AMPA receptor mechanism (as defined in the .mod file) at the middle (0.5) of the dendrite of wdr
+    // then set parameters for this mechanism:
+    ampar_Ad[i].tau_fac   = 0.1 // NOT SUBJECT TO SHORT-TERM PLASTICITY
+    ampar_Ad[i].tau_rec   = 0.1
+    ampar_Ad[i].U1        = 1.0
+    ampar_Ad[i].tau_rise  = 0.1
+    ampar_Ad[i].tau_decay = 5.0
+    ampar_Ad[i].stp = default_stp
+
+    //netcon = new NetCon(source, target, threshold [mV], delay [ms], weight [uS]) -> delay is overwritten by FIinitializeHandler
+    ampa_Ad_conn[i] = new NetCon(nil, ampar_Ad[i], -30.0, 0.0 , 0.0008)   // (0.00085 in NMDA block exp)
+    // create a NetCon object to trigger events for the ampa receptor.
+    // The source is nil because events are to be artificially triggered (i.e. not by a variable crossing the threshold).
+    // The threshold value is therefore useless.
+    // The value of weight will be transmitted to and used by the NET_RECEIVE procedure of the target mechanism.
+
+
+    wdr.dendrite nmdar_Ad[i]  = new NMDA_DynSyn(0.5)
+    nmdar_Ad[i].tau_fac   = 0.1 // NOT SUBJECT TO SHORT-TERM PLASTICITY
+    nmdar_Ad[i].tau_rec   = 0.1
+    nmdar_Ad[i].U1        = 1.0
+    nmdar_Ad[i].tau_rise  = 2.0
+    nmdar_Ad[i].tau_decay = 100.0
+    nmdar_Ad[i].stp = default_stp
+
+    //netcon = new NetCon(source, target, threshold [mV], delay [ms], weight [uS]) -> delay is overwritten by FIinitializeHandler
+    nmda_Ad_conn[i] = new NetCon(nil, nmdar_Ad[i], -30.0, 0.0 , 0.0001)
+
+}
+
+
+// SYNAPSES FROM C-FIBRES
+// ----------------------
+
+C_delay = 200.0		// conduction in C-fibres is slower; this is the delay
+C_dispersion = 20.0	// dispersion in the arrival time of C signals [ms]
+
+
+N_IC = 20		// number of C-fibre synapses impinging on WDR
+
+objref nil
+objref ampar_C[N_IC], nmdar_C[N_IC], gabaar_C[N_IC], nk1r_C[N_IC], asic[N_IC], pH[N_IC]
+objref ampa_C_conn[N_IC], nmda_C_conn[N_IC], gabaa_C_conn[N_IC], nk1_C_conn[N_IC], pH_conn[N_IC]
+
+objref r
+r = new Random(123456789) // use a different seed if you need different random streams; the seed used for the figures in the paper was 123456789
+
+for i=0,N_IC-1 {
+    wdr.dendrite asic[i] = new ASICnativeTone(0.5)
+    asic[i].gbar = 0.00010
+
+    wdr.dendrite ampar_C[i]  = new AMPA_DynSyn(0.5)   // synapse in the middle of the dendrite
+    ampar_C[i].tau_fac   = 0.1
+    ampar_C[i].tau_rec   = 0.1
+    ampar_C[i].U1        = 1.0
+    ampar_C[i].tau_rise  = 0.1
+    ampar_C[i].tau_decay = 5.0
+    ampar_C[i].stp = default_stp
+
+    wdr.dendrite nmdar_C[i]  = new NMDA_DynSyn(0.5)
+    nmdar_C[i].tau_fac   = 0.1
+    nmdar_C[i].tau_rec   = 0.1
+    nmdar_C[i].U1        = 1.0
+    nmdar_C[i].tau_rise  = 2.0
+    nmdar_C[i].tau_decay = 100.0
+    nmdar_C[i].stp = default_stp
+
+    wdr.dendrite nk1r_C[i] = new NK1_DynSyn(0.5)
+    nk1r_C[i].tau_fac    = 0.1
+    nk1r_C[i].tau_rec    = 0.1
+    nk1r_C[i].U1         = 1.0
+    nk1r_C[i].tau_rise   = 150.0
+    nk1r_C[i].tau_decay  = 3000.0
+    nk1r_C[i].stp  = default_stp
+
+    wdr.dendrite gabaar_C[i]  = new GABAa_DynSyn(0.5)
+    gabaar_C[i].tau_fac   = 0.1 // NOT SUBJECT TO SHORT-TERM PLASTICITY
+    gabaar_C[i].tau_rec   = 0.1
+    gabaar_C[i].U1        = 1.0
+    gabaar_C[i].tau_rise  = 0.1
+    gabaar_C[i].tau_decay = 10.0
+    gabaar_C[i].stp = default_stp
+
+    wdr.dendrite pH[i] = new PostProtCleftDyn(0.5)
+        pH[i].tau = 0.5
+        pH[i].pKd = 6.3
+        pH[i].b0 = 22
+        pH[i].pH0 = 7.4
+        pH[i].q0 = 0.5
+        pH[i].duration = 1
+
+
+    //netcon = new NetCon(source, target, threshold [mV], delay [ms], weight [uS])
+    ampa_C_conn[i]  = new NetCon(nil, ampar_C[i],  -30.0, 0.0,     0.006)
+    nmda_C_conn[i]  = new NetCon(nil, nmdar_C[i],  -30.0, 0.0,     0.004)
+    nk1_C_conn[i]  = new NetCon(nil, nk1r_C[i],  -30.0,   0.0,     0.000003)
+    gabaa_C_conn[i] = new NetCon(nil, gabaar_C[i], -30.0, 0.0,     0.0003) //+1.0 (this is not required for windup!; it serves only the purpose of demostrating that GABA_A blockers enhance windup profile responses)
+    pH_conn[i] = new NetCon(nil, pH[i], -30.0, 0.0,     0.0)
+
+}
+
+
+//set activation times
+objref fih
+fih = new FInitializeHandler("loadqueue()")
+// since initialization with init() (which calls finitialize()) clears the event queue, defining the stimulation events cannot be done now.
+// Thanks to this type 1 (default) FInitializeHandler,
+// loadqueue() will be called by finitialize AFTER it has cleared the event queue and initialized all mechanisms.
+
+proc loadqueue() { local ii, jj, event_time  localobj r
+
+    r = new Random(123456789) // use a different seed if you need different random streams; "123456789" is the seed used in the paper figures
+
+    //load Ad-fiber spike times
+    for ii=0,stim_times.size()-1 {
+
+	//distribute through all synapses
+	for jj=0,N_A-1 {
+
+	    event_time = stim_times.x[ii] + Ad_delay + Ad_dispersion * r.repick()
+
+	    ampa_Ad_conn[jj].event( event_time )
+	    // The NetCon object stored at index jj in ampa_Ad_conn will deliver an event at time event_time
+	    nmda_Ad_conn[jj].event( event_time )
+
+	}
+    }
+
+    //load C-fiber spike times
+    for ii=0,stim_times.size()-1 {
+
+    //distribute through all synapses
+	for jj=0,N_IC-1 {
+
+        event_time = stim_times.x[ii] + C_delay + C_dispersion * r.repick()
+
+        ampa_C_conn[jj].event( event_time )
+        nmda_C_conn[jj].event( event_time )
+        nk1_C_conn[jj].event( event_time )
+        pH_conn[jj].event( event_time )
+        gabaa_C_conn[jj].event( event_time  + 1.0)
+	}
+    }
+
+}
+
+
+
+// 5 ****************************************************************************************************
+
+// PROVIDE NOISE TO THE WDR MEMBRANE POTENTIAL
+
+// create source of stimulation for inhibitory and excitatory noise synapses
+objref stim_exc, stim_inh
+
+wdr.soma stim_exc = new NetStim(0.5)
+stim_exc.interval	= 10.0
+stim_exc.start		= 0.0
+stim_exc.number		= 1000000
+stim_exc.noise		= 1.0
+
+wdr.soma stim_inh = new NetStim(0.5)
+stim_inh.interval	= 10.0
+stim_inh.start		= 0.0
+stim_inh.number		= 1000000
+stim_inh.noise		= 1.0
+
+
+objref ampar_noise, gabaar_noise
+
+wdr.soma ampar_noise = new AMPA_DynSyn(0.5)   // excitatory
+ampar_noise.tau_fac    = 0.1
+ampar_noise.tau_rec    = 0.1
+ampar_noise.U1         = 1.0
+ampar_noise.tau_rise   = 0.1
+ampar_noise.tau_decay  = 5.0
+ampar_noise.stp  = default_stp
+
+wdr.soma gabaar_noise = new GABAa_DynSyn(0.5) // inhibitory
+gabaar_noise.tau_fac    = 0.1
+gabaar_noise.tau_rec    = 0.1
+gabaar_noise.U1         = 1.0
+gabaar_noise.tau_rise   = 0.1
+gabaar_noise.tau_decay  = 5.0
+gabaar_noise.stp  = default_stp
+
+
+//netcon = new NetCon(source, target, threshold [mV], delay [ms], weight [uS])
+objref ampa_noise_conn, gabaa_noise_conn
+ampa_noise_conn  = new NetCon(stim_exc, ampar_noise,  -30.0, 0.0, 0.0001)
+gabaa_noise_conn = new NetCon(stim_exc, gabaar_noise, -30.0, 0.0, 0.0001)
+//the mean of the noise current is roughly 0.001 mA/cm²
+
+
+proc set_noise() {
+    ampa_noise_conn.weight = $1
+    gabaa_noise_conn.weight = $2
+}
+
+
+// 6 ****************************************************************************************************
+
+// FINAL COMMANDS
+for i=0,N_IC-1 {
+    setpointer asic[i].he, pH[i].he
+    // // he is a normal variable of PostProtCleftDyn mechanism pH[i], and is shared with the ASIC mechanism asic[i] thanks to its pointer he
+}
+
+// store spike-times
+objref nc, nil, vec
+// create a Netcon object to watch for membrane potential crossing AP threshold:
+wdr.soma nc = new NetCon(&v(.5), nil, -30.0, 0.0, 1.0)
+vec = new Vector()
+// record threshold crossing instants:
+nc.record(vec)
+
+
+//// store plotted variables:
+//WDR
+objref wdr_tvec, wdr_soma_v, wdr_dend_v, wdr_soma_cai, wdr_dend_cai, wdr_dend_icaan, wdr_dend_ical, wdr_dend_ikca, wdr_dend_ica
+wdr_tvec = new Vector()
+
+  // record membrane potential of wdr
+wdr_soma_v = new Vector()
+wdr_dend_v = new Vector()
+wdr.soma cvode.record(&v(.5), wdr_soma_v, wdr_tvec)
+wdr.dendrite cvode.record(&v(.5), wdr_dend_v, wdr_tvec)
+
+  // record intracellular calcium concentration
+wdr_soma_cai = new Vector()
+wdr_dend_cai = new Vector()
+wdr.soma cvode.record(&cai(.5), wdr_soma_cai, wdr_tvec)
+wdr.dendrite cvode.record(&cai(.5), wdr_dend_cai, wdr_tvec)
+
+  // record various channel variables...
+objref m_inf_icaan, tau_m_icaan, m_icaan
+wdr_dend_icaan = new Vector()
+tau_m_icaan = new Vector()
+m_inf_icaan = new Vector()
+m_icaan = new Vector()
+wdr_dend_ical = new Vector()
+wdr_dend_ikca = new Vector()
+wdr.dendrite cvode.record(&ican_iCaAN(.5), wdr_dend_icaan, wdr_tvec)
+wdr.dendrite cvode.record(&tau_m_iCaAN(.5), tau_m_icaan, wdr_tvec)
+wdr.dendrite cvode.record(&m_inf_iCaAN(.5), m_inf_icaan, wdr_tvec)
+wdr.dendrite cvode.record(&m_iCaAN(.5), m_icaan, wdr_tvec)
+wdr.dendrite cvode.record(&ica_iCaL(.1), wdr_dend_ical, wdr_tvec)
+wdr.dendrite cvode.record(&i_iKCa(.5), wdr_dend_ikca, wdr_tvec)
+
+
+wdr_dend_ica = new Vector()
+
+wdr.dendrite cvode.record(&ica(.5), wdr_dend_ica, wdr_tvec)
+
+objref wdr_m, wdr_h, wdr_n
+wdr_m = new Vector()
+wdr_h = new Vector()
+wdr_n = new Vector()
+wdr.soma cvode.record(&m_HH2(.5), wdr_m, wdr_tvec)
+wdr.soma cvode.record(&h_HH2(.5), wdr_h, wdr_tvec)
+wdr.soma cvode.record(&n_HH2(.5), wdr_n, wdr_tvec)
+
+
+
+// receptors
+objref Ad_tvec, Ad_ampa_i[N_A], Ad_nmda_i[N_A], C_tvec, C_ampa_i[N_IC], C_nmda_i[N_IC], C_gaba_i[N_IC], C_nk1_i[N_IC], Cr_tvec
+
+Ad_tvec = new Vector()
+for j=0,N_A-1 {
+    Ad_ampa_i[j] = new Vector()
+    Ad_nmda_i[j] = new Vector()
+    wdr.dendrite cvode.record(&ampar_Ad[j].i, Ad_ampa_i[j], Ad_tvec)
+    wdr.dendrite cvode.record(&nmdar_Ad[j].i, Ad_nmda_i[j], Ad_tvec)
+}
+
+Cr_tvec = new Vector()
+for j=0,N_IC-1 {
+    C_ampa_i[j] = new Vector()
+    C_nmda_i[j] = new Vector()
+    C_nk1_i[j] = new Vector()
+    C_gaba_i[j] = new Vector()
+    wdr.dendrite cvode.record(&ampar_C[j].i, C_ampa_i[j], Cr_tvec)
+    wdr.dendrite cvode.record(&nmdar_C[j].i, C_nmda_i[j], Cr_tvec)
+    wdr.dendrite cvode.record(&nk1r_C[j].i, C_nk1_i[j], Cr_tvec)
+    wdr.dendrite cvode.record(&gabaar_C[j].i, C_gaba_i[j], Cr_tvec)
+}
+
+objref C_ampa_A[N_IC], C_ampa_B[N_IC], C_nmda_A[N_IC], C_nmda_B[N_IC], C_gaba_A[N_IC], C_gaba_B[N_IC], C_nmda_mgb[N_IC]
+for j=0,N_IC-1 {
+    C_ampa_A[j] = new Vector()
+    C_ampa_B[j] = new Vector()
+    C_nmda_A[j] = new Vector()
+    C_nmda_B[j] = new Vector()
+    C_nmda_mgb[j] = new Vector()
+    C_gaba_A[j] = new Vector()
+    C_gaba_B[j] = new Vector()
+    wdr.dendrite cvode.record(&ampar_C[j].A, C_ampa_A[j], Cr_tvec)
+    wdr.dendrite cvode.record(&ampar_C[j].B, C_ampa_B[j], Cr_tvec)
+    wdr.dendrite cvode.record(&nmdar_C[j].A, C_nmda_A[j], Cr_tvec)
+    wdr.dendrite cvode.record(&nmdar_C[j].B, C_nmda_B[j], Cr_tvec)
+    wdr.dendrite cvode.record(&nmdar_C[j].mgb, C_nmda_mgb[j], Cr_tvec)
+    wdr.dendrite cvode.record(&gabaar_C[j].A, C_gaba_A[j], Cr_tvec)
+    wdr.dendrite cvode.record(&gabaar_C[j].B, C_gaba_B[j], Cr_tvec)
+}
+
+
+objref m_inf_dend_ical, tau_m_dend_ical, ghk_dend_ical, m_dend_ical
+m_inf_dend_ical = new Vector()
+tau_m_dend_ical = new Vector()
+ghk_dend_ical = new Vector()
+m_dend_ical = new Vector()
+wdr.dendrite cvode.record(&m_inf_iCaL(.5), m_inf_dend_ical, wdr_tvec)
+wdr.dendrite cvode.record(&tau_m_iCaL(.5), tau_m_dend_ical, wdr_tvec)
+wdr.dendrite cvode.record(&ghkval_iCaL(.5), ghk_dend_ical, wdr_tvec)
+wdr.dendrite cvode.record(&m_iCaL(.5), m_dend_ical, wdr_tvec)
+
+
+objref m_inf_soma_ical, tau_m_soma_ical, ghk_soma_ical, m_soma_ical
+m_inf_soma_ical = new Vector()
+tau_m_soma_ical = new Vector()
+ghk_soma_ical = new Vector()
+m_soma_ical = new Vector()
+wdr.soma cvode.record(&m_inf_iCaL(.5), m_inf_soma_ical, wdr_tvec)
+wdr.soma cvode.record(&tau_m_iCaL(.5), tau_m_soma_ical, wdr_tvec)
+wdr.soma cvode.record(&ghkval_iCaL(.5), ghk_soma_ical, wdr_tvec)
+wdr.soma cvode.record(&m_iCaL(.5), m_soma_ical, wdr_tvec)
+
+
+objref m_inf_dend_ikca, tau_m_dend_ikca, m_dend_ikca
+m_inf_dend_ikca = new Vector()
+tau_m_dend_ikca = new Vector()
+m_dend_ikca = new Vector()
+wdr.dendrite cvode.record(&m_inf_iKCa(.5), m_inf_dend_ikca, wdr_tvec)
+wdr.dendrite cvode.record(&tau_m_iKCa(.5), tau_m_dend_ikca, wdr_tvec)
+wdr.dendrite cvode.record(&m_iKCa(.5), m_dend_ikca, wdr_tvec)
+
+objref wdr_dend_ipas
+wdr_dend_ipas = new Vector()
+wdr.dendrite cvode.record(&i_pas(.5), wdr_dend_ipas, wdr_tvec)
+
+objref m_inf_soma_ikca, tau_m_soma_ikca, m_soma_ikca
+m_inf_soma_ikca = new Vector()
+tau_m_soma_ikca = new Vector()
+m_soma_ikca = new Vector()
+wdr.soma cvode.record(&m_inf_iKCa(.5), m_inf_soma_ikca, wdr_tvec)
+wdr.soma cvode.record(&tau_m_iKCa(.5), tau_m_soma_ikca, wdr_tvec)
+wdr.soma cvode.record(&m_iKCa(.5), m_soma_ikca, wdr_tvec)
+
+objref m_inf_inap, tau_m_inap, m_inap, h_inf_inap, tau_h_inap, h_inap
+m_inf_inap = new Vector()
+tau_m_inap = new Vector()
+m_inap = new Vector()
+h_inf_inap = new Vector()
+tau_h_inap = new Vector()
+h_inap = new Vector()
+wdr.soma cvode.record(&m_inf_iNaP(.5), m_inf_inap, wdr_tvec)
+wdr.soma cvode.record(&tau_m_iNaP(.5), tau_m_inap, wdr_tvec)
+wdr.soma cvode.record(&m_iNaP(.5), m_inap, wdr_tvec)
+wdr.soma cvode.record(&h_inf_iNaP(.5), h_inf_inap, wdr_tvec)
+wdr.soma cvode.record(&tau_h_iNaP(.5), tau_h_inap, wdr_tvec)
+wdr.soma cvode.record(&h_iNaP(.5), h_inap, wdr_tvec)
+
+objref m_inf_inahh, tau_m_inahh, m_inahh, h_inf_inahh, tau_h_inahh, h_inahh, n_inf_ikhh, tau_n_ikhh, n_ikhh
+m_inf_inahh = new Vector()
+tau_m_inahh = new Vector()
+m_inahh = new Vector()
+h_inf_inahh = new Vector()
+tau_h_inahh = new Vector()
+h_inahh = new Vector()
+n_inf_ikhh = new Vector()
+tau_n_ikhh = new Vector()
+n_ikhh = new Vector()
+wdr.soma cvode.record(&m_inf_HH2(.5), m_inf_inahh, wdr_tvec)
+wdr.soma cvode.record(&tau_m_HH2(.5), tau_m_inahh, wdr_tvec)
+wdr.soma cvode.record(&m_HH2(.5), m_inahh, wdr_tvec)
+wdr.soma cvode.record(&h_inf_HH2(.5), h_inf_inahh, wdr_tvec)
+wdr.soma cvode.record(&tau_h_HH2(.5), tau_h_inahh, wdr_tvec)
+wdr.soma cvode.record(&h_HH2(.5), h_inahh, wdr_tvec)
+wdr.soma cvode.record(&n_inf_HH2(.5), n_inf_ikhh, wdr_tvec)
+wdr.soma cvode.record(&tau_n_HH2(.5), tau_n_ikhh, wdr_tvec)
+wdr.soma cvode.record(&n_HH2(.5), n_ikhh, wdr_tvec)
+
+
+objref wdr_soma_ikhh, wdr_soma_inahh, wdr_soma_ipas, wdr_soma_ikca, wdr_soma_inap, wdr_soma_ical
+wdr_soma_ikhh = new Vector()
+wdr_soma_inahh = new Vector()
+wdr_soma_inap = new Vector()
+wdr_soma_ipas = new Vector()
+wdr_soma_ikca = new Vector()
+wdr_soma_ical = new Vector()
+wdr.soma cvode.record(&ik_HH2(.5), wdr_soma_ikhh, wdr_tvec)
+wdr.soma cvode.record(&ina_HH2(.5), wdr_soma_inahh, wdr_tvec)
+wdr.soma cvode.record(&ina_iNaP(.5), wdr_soma_inap, wdr_tvec)
+wdr.soma cvode.record(&i_pas(.5), wdr_soma_ipas, wdr_tvec)
+wdr.soma cvode.record(&i_iKCa(.5), wdr_soma_ikca, wdr_tvec)
+wdr.soma cvode.record(&ica_iCaL(.5), wdr_soma_ical, wdr_tvec)
+
+// pH dynamics
+objref cleft_he[N_IC], prot_q[N_IC], cleft_tot_prot[N_IC], h0[N_IC]
+for j=0,N_IC-1 {
+    cleft_he[j] = new Vector()
+    prot_q[j] = new Vector()
+    cleft_tot_prot[j] = new Vector()
+    h0[j] = new Vector()
+    wdr.dendrite cvode.record(&pH[j].he, cleft_he, wdr_tvec)
+    wdr.dendrite cvode.record(&pH[j].q, prot_q, wdr_tvec)
+    wdr.dendrite cvode.record(&pH[j].tot_prot, cleft_tot_prot, wdr_tvec)
+    wdr.dendrite cvode.record(&pH[j].h0, h0, wdr_tvec)
+}
+
+//ASICs
+objref ASIC_pH[N_IC], ASIC_m[N_IC], ASIC_h[N_IC], ASIC_i[N_IC], ASIC_m_inf[N_IC], ASIC_h_inf[N_IC], ASIC_tau_m[N_IC], ASIC_tau_h[N_IC]
+for j=0,N_IC-1 {
+    ASIC_pH[j] = new Vector()
+    ASIC_m[j] = new Vector()
+    ASIC_h[j] = new Vector()
+    ASIC_i[j] = new Vector()
+    ASIC_m_inf[j] = new Vector()
+    ASIC_h_inf[j] = new Vector()
+    ASIC_tau_m[j] = new Vector()
+    ASIC_tau_h[j] = new Vector()
+    wdr.dendrite cvode.record(&ASICnativeTone[j].pH, ASIC_pH[j], wdr_tvec)
+    wdr.dendrite cvode.record(&ASICnativeTone[j].m, ASIC_m[j], wdr_tvec)
+    wdr.dendrite cvode.record(&ASICnativeTone[j].h, ASIC_h[j], wdr_tvec)
+    wdr.dendrite cvode.record(&ASICnativeTone[j].i, ASIC_i[j], wdr_tvec)
+    wdr.dendrite cvode.record(&ASICnativeTone[j].m_inf, ASIC_m_inf[j], wdr_tvec)
+    wdr.dendrite cvode.record(&ASICnativeTone[j].h_inf, ASIC_h_inf[j], wdr_tvec)
+    wdr.dendrite cvode.record(&ASICnativeTone[j].tau_m, ASIC_tau_m[j], wdr_tvec)
+    wdr.dendrite cvode.record(&ASICnativeTone[j].tau_h, ASIC_tau_h[j], wdr_tvec)
+}
+
+// from here added
+
+//objref C_ampa_A, C_ampa_B
+//C_ampa_A = new Vector()
+//C_ampa_B = new Vector()
+//wdr.dendrite cvode.record(&ampar_C.A, C_ampa_A, Cr_tvec)
+//wdr.dendrite cvode.record(&ampar_C.B, C_ampa_B, Cr_tvec)
+
+//objref C_nmda_A, C_nmda_B
+//C_nmda_A = new Vector()
+//C_nmda_B = new Vector()
+//wdr.dendrite cvode.record(&nmdar_C.A, C_nmda_A, Cr_tvec)
+//wdr.dendrite cvode.record(&nmdar_C.B, C_nmda_B, Cr_tvec)
+
+objref C_nk1_A[N_IC], C_nk1_B[N_IC]
+for j=0,N_IC-1 {
+    C_nk1_A[j] = new Vector()
+    C_nk1_B[j] = new Vector()
+    wdr.dendrite cvode.record(&nk1r_C[j].A, C_nk1_A[j], Cr_tvec)
+    wdr.dendrite cvode.record(&nk1r_C[j].B, C_nk1_B[j], Cr_tvec)
+}
+
+//objref Cdiff_C_nk1_i
+//Cdiff_C_nk1_i = new Vector()
+//wdr.dendrite cvode.record(&nk1r_C_WDR.i, Cdiff_C_nk1_i, Cr_tvec)
+
+//objref Cdiff_nk1_A, Cdiff_nk1_B
+//Cdiff_nk1_A = new Vector()
+//Cdiff_nk1_B = new Vector()
+//wdr.dendrite cvode.record(&nk1r_C.A, Cdiff_nk1_A, Cr_tvec)
+//wdr.dendrite cvode.record(&nk1r_C.B, Cdiff_nk1_B, Cr_tvec)
+
+
+// total and calcium current??
+objref wdr_soma_ica
+wdr_soma_ica = new Vector()
+wdr.soma cvode.record(&ica(.5), wdr_soma_ica, wdr_tvec)
+
+objref dend_nmda_ica[N_IC]
+for j=0,N_IC-1 {
+    dend_nmda_ica[j] = new Vector()
+    wdr.dendrite cvode.record(&nmdar_C[j].ica, dend_nmda_ica[j], Cr_tvec)
+}
+
+
+objref dend_C_nk1_ica
+dend_C_nk1_ica = new Vector()
+wdr.dendrite cvode.record(&nk1r_C.ica, dend_C_nk1_ica, Cr_tvec)
+
+objref wdr_cao
+wdr_cao = new Vector()
+wdr.dendrite cvode.record(&cao(.5), wdr_cao, wdr_tvec)
+
+// to here added
+
+
+access wdr.soma
+
+//load_file("wdr-complete-model.ses")
+
+tstop = (n_stim_sets + 1) * T2 + start_time  // end time of the simulation
+do_print = 1
+
+celsius = 36
+
+// dt = 0.0125 //has finite representation in binary
+
+
+init()
+// run()
+
+// define the proc that writes spike times (to file "wdr_spike_times.dat" if no file name is given in argument)
+objref fileobj
+fileobj = new File()
+proc store_wdr() {
+    if (numarg()){
+        fileobj.wopen($s1)
+    } else {
+        fileobj.wopen("wdr_spike_times.dat")
+    }
+    // write vector vec into file:
+    vec.printf(fileobj)
+    fileobj.close()
+    printf("Saved\n")
+//    forall delete_section()
+}
+
+
+
+
+
+
+//************************************************************************************
+//UNITS	    
+//Category						Variable		Units
+//Time							t				[ms]
+//Voltage						v				[mV]
+//Current						i				[mA/cm2] (distributed)	[nA] (point process)
+//Concentration					ko, ki, etc.	[mM]
+//Specific capacitance			cm				[uf/cm2]
+//Length						diam, L			[um]
+//Conductance					g				[S/cm2] (distributed)	[uS] (point process)
+//Cytoplasmic resistivity		Ra				[ohm cm]
+//Resistance					Ri				[10E6 ohm]

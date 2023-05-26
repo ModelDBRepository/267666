@@ -1,0 +1,16 @@
+load_file("nrngui.hoc")
+// load_file("wdr-complete-model.hoc")   //4.A
+// load_file("wdr-complete-model-without-interneuron.hoc")   //4.B
+
+
+load_file("wdr-complete-model-without-interneuron.hoc")
+cvode.active(1)
+cvode.use_local_dt(1)
+cvode.atol(1e-4)
+
+// set_noise(0.0001, 0.0001)  // default
+// n_stim_sets = 16     // then needs to construct stim times
+
+run()
+
+store_wdr("mitx.dat")
